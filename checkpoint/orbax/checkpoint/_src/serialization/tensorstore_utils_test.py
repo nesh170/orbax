@@ -699,5 +699,68 @@ class GetTsContextTest(parameterized.TestCase):
     self.assertDictEqual(expected_spec, context.spec.to_json())
 
 
+class S3KvstoreTspecTest(absltest.TestCase):
+  """Tests for S3 support in build_kvstore_tspec."""
+
+  def test_s3_ocdbt_normpath(self):
+    """Verify normpath does not corrupt s3:// prefix."""
+    spec = ts_utils.build_kvstore_tspec('s3://bucket/path', use_ocdbt=True)
+    self.assertEqual(spec['driver'], 'ocdbt')
+    self.assertEqual(spec['base'], 's3://bucket/path')
+
+  def test_s3_ocdbt_with_name(self):
+    spec = ts_utils.build_kvstore_tspec(
+        's3://bucket/path', name='param', use_ocdbt=True
+    )
+    self.assertEqual(spec['driver'], 'ocdbt')
+    self.assertEqual(spec['base'], 's3://bucket/path')
+    self.assertEqual(spec['path'], 'param')
+
+  def test_s3_non_ocdbt(self):
+    spec = ts_utils.build_kvstore_tspec(
+        's3://bucket/path', name='param', use_ocdbt=False
+    )
+    self.assertEqual(spec['driver'], 's3')
+    self.assertEqual(spec['bucket'], 'bucket')
+    self.assertEqual(spec['path'], 'path/param')
+
+
+class S3TsContextTest(absltest.TestCase):
+  """Tests for S3Options support in get_ts_context."""
+
+  def test_s3_options_concurrency(self):
+    from orbax.checkpoint.options import S3Options  # pylint: disable=g-import-not-at-top
+
+    opts = S3Options(max_concurrent_requests=16)
+    context = ts_utils.get_ts_context(s3_options=opts)
+    spec = context.spec.to_json()
+    self.assertEqual(spec['s3_request_concurrency'], {'limit': 16})
+
+  def test_s3_options_write_rate(self):
+    from orbax.checkpoint.options import S3Options  # pylint: disable=g-import-not-at-top
+
+    opts = S3Options(write_rate=10.0, read_rate=50.0)
+    context = ts_utils.get_ts_context(s3_options=opts)
+    spec = context.spec.to_json()
+    self.assertEqual(
+        spec['experimental_s3_rate_limiter'],
+        {'write_rate': 10.0, 'read_rate': 50.0},
+    )
+
+  def test_s3_options_none_rates_no_limiter(self):
+    from orbax.checkpoint.options import S3Options  # pylint: disable=g-import-not-at-top
+
+    opts = S3Options()  # both rates are None
+    context = ts_utils.get_ts_context(s3_options=opts)
+    spec = context.spec.to_json()
+    self.assertNotIn('experimental_s3_rate_limiter', spec)
+
+  def test_no_s3_options(self):
+    context = ts_utils.get_ts_context()
+    spec = context.spec.to_json()
+    self.assertNotIn('s3_request_concurrency', spec)
+    self.assertNotIn('experimental_s3_rate_limiter', spec)
+
+
 if __name__ == '__main__':
   absltest.main()

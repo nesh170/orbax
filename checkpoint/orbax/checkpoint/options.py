@@ -70,3 +70,21 @@ class FileOptions:
   """
 
   path_permission_mode: int | None = None
+
+
+@dataclasses.dataclass
+class S3Options:
+  """Options for S3 checkpointing.
+
+  Attributes:
+    max_concurrent_requests: Max concurrent S3 API requests per process.
+      Maps to TensorStore s3_request_concurrency. Default 32.
+    write_rate: Max write/delete calls per second. Maps to TensorStore
+      experimental_s3_rate_limiter.write_rate. None means unlimited.
+    read_rate: Max read/list calls per second. Maps to TensorStore
+      experimental_s3_rate_limiter.read_rate. None means unlimited.
+  """
+
+  max_concurrent_requests: int = 32
+  write_rate: float | None = None
+  read_rate: float | None = None

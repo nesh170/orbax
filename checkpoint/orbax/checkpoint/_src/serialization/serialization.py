@@ -98,16 +98,21 @@ def get_tensorstore_spec(ckpt_path: str, ocdbt: bool = False):
   """Constructs a TensorStore spec for the given checkpoint path."""
   # Normalize path to exclude trailing '/'. In GCS path case, we will need to
   # fix the path prefix to add back the stripped '/'.
-  ckpt_path = os.path.normpath(ckpt_path).replace('gs:/', 'gs://')
+  ckpt_path = (
+      os.path.normpath(ckpt_path)
+      .replace('gs:/', 'gs://')
+      .replace('s3:/', 's3://')
+  )
   is_gcs_path = ckpt_path.startswith('gs://')
+  is_s3_path = ckpt_path.startswith('s3://')
   spec = {'driver': 'zarr', 'kvstore': {}}
   if ocdbt:
-    if not is_gcs_path and not os.path.isabs(ckpt_path):
+    if not is_gcs_path and not is_s3_path and not os.path.isabs(ckpt_path):
       raise ValueError(f'Checkpoint path should be absolute. Got {ckpt_path}')
     base_path = os.path.dirname(ckpt_path)
     base_driver_spec = (
         base_path
-        if is_gcs_path
+        if (is_gcs_path or is_s3_path)
         else {'driver': ts_utils.DEFAULT_DRIVER, 'path': base_path}
     )
     spec['kvstore'] = {
@@ -118,6 +123,11 @@ def get_tensorstore_spec(ckpt_path: str, ocdbt: bool = False):
   else:
     if is_gcs_path:
       spec['kvstore'] = _get_kvstore_for_gcs(ckpt_path)
+    elif is_s3_path:
+      m = re.fullmatch(r'^s3://([^/]*)/(.*)$', ckpt_path, re.DOTALL)
+      if m is None:
+        raise ValueError(f'Invalid S3 path: {ckpt_path}')
+      spec['kvstore'] = {'driver': 's3', 'bucket': m.group(1), 'path': m.group(2)}
     else:
       spec['kvstore'] = {'driver': ts_utils.DEFAULT_DRIVER, 'path': ckpt_path}
 

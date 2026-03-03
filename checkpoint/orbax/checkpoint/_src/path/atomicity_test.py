@@ -206,5 +206,30 @@ class ReadOnlyTemporaryPathTest(
 
 
 
+class AtomicityDefaultsS3Test(absltest.TestCase):
+  """Tests for S3 support in atomicity_defaults."""
+
+  def test_s3_returns_commit_file_temporary_path(self):
+    from orbax.checkpoint._src.path import atomicity_defaults  # pylint: disable=g-import-not-at-top
+
+    path = epath.Path('s3://my-bucket/checkpoint')
+    cls = atomicity_defaults.get_default_temporary_path_class(path)
+    self.assertIs(cls, atomicity.CommitFileTemporaryPath)
+
+  def test_s3_item_returns_commit_file_temporary_path(self):
+    from orbax.checkpoint._src.path import atomicity_defaults  # pylint: disable=g-import-not-at-top
+
+    path = epath.Path('s3://my-bucket/checkpoint/item')
+    cls = atomicity_defaults.get_item_default_temporary_path_class(path)
+    self.assertIs(cls, atomicity.CommitFileTemporaryPath)
+
+  def test_local_returns_atomic_rename_temporary_path(self):
+    from orbax.checkpoint._src.path import atomicity_defaults  # pylint: disable=g-import-not-at-top
+
+    path = epath.Path('/tmp/checkpoint')
+    cls = atomicity_defaults.get_default_temporary_path_class(path)
+    self.assertIs(cls, atomicity.AtomicRenameTemporaryPath)
+
+
 if __name__ == '__main__':
   absltest.main()

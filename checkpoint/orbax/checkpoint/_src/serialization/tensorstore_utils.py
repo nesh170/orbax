@@ -56,6 +56,7 @@ ZARR_VER2 = 'zarr'
 ZARR_VER3 = 'zarr3'
 
 _GCS_PATH_RE = r'^gs://([^/]*)/(.*)$'
+_S3_PATH_RE = r'^s3://([^/]*)/(.*)$'
 
 # Even if the data is equal to the fill value, we still want to write it
 # to the checkpoint. This results in unnecessary writes in some edge
@@ -89,6 +90,7 @@ def get_ts_context(
     use_ocdbt: bool = True,
     file_io_concurrency_limit: int | None = None,
     data_copy_concurrency_limit: int | None = None,
+    s3_options=None,
 ) -> ts.Context:
   """Creates a TensorStore context object.
 
@@ -102,6 +104,8 @@ def get_ts_context(
       file I/O.
     data_copy_concurrency_limit: Optionally overrides the thread pool size for
       compressing and copying data.
+    s3_options: Optional S3Options for configuring S3 request concurrency and
+      rate limiting.
 
   Returns:
     A TensorStore context object.
@@ -117,6 +121,17 @@ def get_ts_context(
     context.setdefault('data_copy_concurrency', {})[
         'limit'
     ] = data_copy_concurrency_limit
+  if s3_options is not None:
+    context['s3_request_concurrency'] = {
+        'limit': s3_options.max_concurrent_requests
+    }
+    if s3_options.write_rate is not None or s3_options.read_rate is not None:
+      rate_limiter = {}
+      if s3_options.write_rate is not None:
+        rate_limiter['write_rate'] = s3_options.write_rate
+      if s3_options.read_rate is not None:
+        rate_limiter['read_rate'] = s3_options.read_rate
+      context['experimental_s3_rate_limiter'] = rate_limiter
   return ts.Context(context)
 
 
@@ -133,6 +148,13 @@ def _get_kvstore_for_gcs(ckpt_path: str) -> JsonSpec:
   gcs_bucket = m.group(1)
   path_without_bucket = m.group(2)
   return {'driver': 'gcs', 'bucket': gcs_bucket, 'path': path_without_bucket}
+
+
+def _get_kvstore_for_s3(ckpt_path: str) -> JsonSpec:
+  m = re.fullmatch(_S3_PATH_RE, ckpt_path, re.DOTALL)
+  if m is None:
+    raise ValueError(f'Invalid S3 path: {ckpt_path}')
+  return {'driver': 's3', 'bucket': m.group(1), 'path': m.group(2)}
 
 
 def build_kvstore_tspec(
@@ -159,14 +181,19 @@ def build_kvstore_tspec(
     A Tensorstore KvStore spec in dictionary form.
   """
   default_driver = DEFAULT_DRIVER
-  # Normalize path to exclude trailing '/'. In GCS path case, we will need to
-  # fix the path prefix to add back the stripped '/'.
-  directory = os.path.normpath(directory).replace('gs:/', 'gs://')
+  # Normalize path to exclude trailing '/'. In GCS/S3 path case, we will need
+  # to fix the path prefix to add back the stripped '/'.
+  directory = (
+      os.path.normpath(directory)
+      .replace('gs:/', 'gs://')
+      .replace('s3:/', 's3://')
+  )
   is_gcs_path = directory.startswith('gs://')
+  is_s3_path = directory.startswith('s3://')
   kv_spec = {}
 
   if use_ocdbt:
-    if not is_gcs_path and not os.path.isabs(directory):
+    if not is_gcs_path and not is_s3_path and not os.path.isabs(directory):
       raise ValueError(f'Checkpoint path should be absolute. Got {directory}')
     if process_id is not None:
       process_id = str(process_id)
@@ -186,7 +213,7 @@ def build_kvstore_tspec(
       directory = os.path.join(*join_paths)
     base_driver_spec = (
         directory
-        if is_gcs_path
+        if (is_gcs_path or is_s3_path)
         else {'driver': default_driver, 'path': str(directory)}
     )
     kv_spec.update({
@@ -217,6 +244,8 @@ def build_kvstore_tspec(
       path = os.path.join(directory, name)
     if is_gcs_path:
       kv_spec = _get_kvstore_for_gcs(path)
+    elif is_s3_path:
+      kv_spec = _get_kvstore_for_s3(path)
     else:
       kv_spec = {'driver': default_driver, 'path': path}
 

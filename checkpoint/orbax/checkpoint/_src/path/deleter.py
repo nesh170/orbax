@@ -29,6 +29,7 @@ import jax
 from orbax.checkpoint._src.logging import event_tracking
 from orbax.checkpoint._src.multihost import multihost
 from orbax.checkpoint._src.path import gcs_utils
+from orbax.checkpoint._src.path import s3_utils
 from orbax.checkpoint._src.path import step as step_lib
 
 
@@ -188,13 +189,16 @@ class StandardCheckpointDeleter:
           # This is recommended for GCS buckets with HNS enabled and requires
           # `_todelete_full_path` to be specified.
           self._gcs_rename_step(step, delete_target)
+        elif s3_utils.is_s3_path(self._directory):
+          # S3 does not support rename; fall through to permanent deletion.
+          self._delete_step_permanently(step, delete_target)
         else:
           raise NotImplementedError()
       # Attempt to rename to local subdirectory using `todelete_subdir`
-      # if configured.
+      # if configured (not supported for GCS or S3).
       elif self._todelete_subdir is not None and not gcs_utils.is_gcs_path(
           self._directory
-      ):
+      ) and not s3_utils.is_s3_path(self._directory):
         self._rename_step_to_subdir(step, delete_target)
       # The final case: fall back to permanent deletion.
       else:

@@ -32,6 +32,27 @@ from typing import Any, AsyncIterator, Iterator
 from etils import epath
 
 
+async def _ts_kvstore_write(path: epath.Path, data: bytes) -> None:
+  """Writes bytes to an S3 path using TensorStore KvStore."""
+  from orbax.checkpoint._src.path import s3_utils  # pylint: disable=g-import-not-at-top
+  import tensorstore as ts  # pylint: disable=g-import-not-at-top
+
+  bucket, obj_path = s3_utils.parse_s3_path(path)
+  kv = await ts.KvStore.open({'driver': 's3', 'bucket': bucket, 'path': obj_path})
+  # S3 PUT is atomic; no transaction needed.
+  await kv.write(b'', data)
+
+
+async def _ts_kvstore_exists(path: epath.Path) -> bool:
+  """Checks existence of an S3 path using TensorStore KvStore."""
+  from orbax.checkpoint._src.path import s3_utils  # pylint: disable=g-import-not-at-top
+  import tensorstore as ts  # pylint: disable=g-import-not-at-top
+
+  bucket, obj_path = s3_utils.parse_s3_path(path)
+  kv = await ts.KvStore.open({'driver': 's3', 'bucket': bucket, 'path': obj_path})
+  result = await kv.read(b'')
+  return result.value is not None
+
 
 async def mkdir(
     path: epath.Path,
@@ -40,6 +61,11 @@ async def mkdir(
     mode: int | None = None,
 ):
   """Creates a directory asynchronously."""
+  from orbax.checkpoint._src.path import s3_utils  # pylint: disable=g-import-not-at-top
+
+  # S3 has no directory concept; mkdir is a no-op.
+  if s3_utils.is_s3_path(path):
+    return
 
   def _mkdir_sync(**thread_kwargs):
     """Synchronously creates a directory."""
@@ -50,6 +76,13 @@ async def mkdir(
 
 
 async def write_bytes(path: epath.Path, data: Any) -> int:
+  from orbax.checkpoint._src.path import s3_utils  # pylint: disable=g-import-not-at-top
+
+  if s3_utils.is_s3_path(path):
+    if isinstance(data, str):
+      data = data.encode()
+    await _ts_kvstore_write(path, data)
+    return len(data)
 
   def _write():
     try:
@@ -66,6 +99,12 @@ async def read_bytes(path: epath.Path) -> bytes:
 
 
 async def write_text(path: epath.Path, text: str) -> int:
+  from orbax.checkpoint._src.path import s3_utils  # pylint: disable=g-import-not-at-top
+
+  if s3_utils.is_s3_path(path):
+    data = text.encode()
+    await _ts_kvstore_write(path, data)
+    return len(data)
 
   def _write():
     try:
@@ -82,6 +121,10 @@ async def read_text(path: epath.Path) -> str:
 
 
 async def exists(path: epath.Path):
+  from orbax.checkpoint._src.path import s3_utils  # pylint: disable=g-import-not-at-top
+
+  if s3_utils.is_s3_path(path):
+    return await _ts_kvstore_exists(path)
   return await asyncio.to_thread(path.exists)
 
 
