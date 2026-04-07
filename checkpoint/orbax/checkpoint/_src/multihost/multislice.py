@@ -249,7 +249,8 @@ def _globalize_single_replica_arrays(
 
   if is_source:
     for s in inp.addressable_shards:
-      source_device_map[s.device] = jnp.expand_dims(s.data, axis=0)
+      with jax.default_device(s.device):
+        source_device_map[s.device] = jnp.expand_dims(s.data, axis=0)
 
   device_buffers = []
   for d, index in global_sharding.addressable_devices_indices_map(
