@@ -20,6 +20,8 @@ import asyncio
 import dataclasses
 import functools
 import os
+import shutil
+import tempfile
 import time
 from typing import Any, Dict, Sequence, Set, Tuple, TypeAlias, Union, cast
 import warnings
@@ -47,6 +49,7 @@ from orbax.checkpoint._src.serialization import replica_slices
 from orbax.checkpoint._src.serialization import serialization
 from orbax.checkpoint._src.serialization import tensorstore_utils as ts_utils
 from orbax.checkpoint._src.serialization import types
+from orbax.checkpoint._src.serialization import s3_utils
 from orbax.checkpoint._src.serialization import worker_memory_utils
 from orbax.checkpoint._src.tree import utils as tree_utils
 import tensorstore as ts
@@ -553,75 +556,100 @@ async def _async_serialize_replica_slices(
     ext_metadata: Dict[str, Any],
 ) -> None:
   """This function contains the logic from ArrayHandler._background_serialize."""
-  write_coros = []
-  ocdbt_transaction: ts.Transaction | None = None
-  array_metadatas = []
-  for value, info, arg in zip(values, infos, args):
-    if info.is_ocdbt_checkpoint and info.byte_limiter is None:
-      if ocdbt_transaction is None:
-        ocdbt_transaction = ts.Transaction(atomic=True)
-    replica_separate_folder = False
-    if use_replica_parallel and enable_replica_parallel_separate_folder:
-      if info.is_ocdbt_checkpoint:
-        replica_separate_folder = _is_replicated_sharding(value.sharding)
-      else:
-        logging.log_first_n(
-            logging.WARNING,
-            'Replica_separate_folder is disabled as OCDBT is not enabled.',
-            1,
-        )
-    await info.await_path_creation()
-    array_write_spec = ts_utils.build_array_write_spec(
-        info=info,
-        arg=arg,
-        global_shape=value.global_shape,
-        local_shape=value.local_shape,
-        dtype=value.dtype,
-        use_ocdbt=info.is_ocdbt_checkpoint,
-        process_index=ocdbt_utils.get_process_index_for_subdir(
-            info.is_ocdbt_checkpoint
-        ),
-        replica_separate_folder=replica_separate_folder,
-        metadata_key=metadata_key,
-        ext_metadata=ext_metadata.get(info.name),
-    )
-    tspec = array_write_spec.json
-    ts_context = info.ts_context
-
-    if logging.vlog_is_on(1):
-      logging.vlog(1, 'info: %s', info)
-      logging.vlog(1, 'arg: %s', arg)
-      logging.vlog(
-          1,
-          'value.global_shape: %s, value.sharding: %s',
-          value.global_shape,
-          value.sharding,
+  # When the destination is an S3 path, TensorStore writes to a local temp
+  # directory first.  After all writes complete, the entire directory is
+  # uploaded to S3 via boto3 and the temp directory is removed.
+  s3_target: str | None = None
+  local_write_dir: str | None = None
+  if infos:
+    parent_dir_str = infos[0].parent_dir.as_posix()
+    if s3_utils.is_s3_path(parent_dir_str):
+      s3_target = parent_dir_str
+      local_write_dir = tempfile.mkdtemp(prefix='orbax_s3_write_')
+      logging.info(
+          'S3 destination detected (%s); staging writes to %s',
+          s3_target,
+          local_write_dir,
       )
-      logging.vlog(1, 'tspec: %s', tspec)
 
-    write_coros.append(
-        serialization.async_serialize_from_host(
-            value,
-            tspec,
-            primary_host=primary_host,
-            context=ts_context,
-            transaction=ocdbt_transaction,
-            byte_limiter=info.byte_limiter,
-        )
-    )
-    array_metadatas.append(array_write_spec.metadata)
-  if array_metadata_store is not None:
-    write_coros.append(
-        array_metadata_store.write(
-            checkpoint_dir=infos[0].parent_dir,
-            array_metadatas=array_metadatas,
-            process_index=multihost.process_index(),
-        )
-    )
+  try:
+    write_coros = []
+    ocdbt_transaction: ts.Transaction | None = None
+    array_metadatas = []
+    for value, info, arg in zip(values, infos, args):
+      if info.is_ocdbt_checkpoint and info.byte_limiter is None:
+        if ocdbt_transaction is None:
+          ocdbt_transaction = ts.Transaction(atomic=True)
+      replica_separate_folder = False
+      if use_replica_parallel and enable_replica_parallel_separate_folder:
+        if info.is_ocdbt_checkpoint:
+          replica_separate_folder = _is_replicated_sharding(value.sharding)
+        else:
+          logging.log_first_n(
+              logging.WARNING,
+              'Replica_separate_folder is disabled as OCDBT is not enabled.',
+              1,
+          )
+      await info.await_path_creation()
+      array_write_spec = ts_utils.build_array_write_spec(
+          info=info,
+          arg=arg,
+          global_shape=value.global_shape,
+          local_shape=value.local_shape,
+          dtype=value.dtype,
+          use_ocdbt=info.is_ocdbt_checkpoint,
+          process_index=ocdbt_utils.get_process_index_for_subdir(
+              info.is_ocdbt_checkpoint
+          ),
+          replica_separate_folder=replica_separate_folder,
+          metadata_key=metadata_key,
+          ext_metadata=ext_metadata.get(info.name),
+          directory_override=local_write_dir,
+      )
+      tspec = array_write_spec.json
+      ts_context = info.ts_context
 
-  await asyncio.gather(*write_coros)
-  if ocdbt_transaction is not None:
-    await ocdbt_transaction.commit_async()
+      if logging.vlog_is_on(1):
+        logging.vlog(1, 'info: %s', info)
+        logging.vlog(1, 'arg: %s', arg)
+        logging.vlog(
+            1,
+            'value.global_shape: %s, value.sharding: %s',
+            value.global_shape,
+            value.sharding,
+        )
+        logging.vlog(1, 'tspec: %s', tspec)
+
+      write_coros.append(
+          serialization.async_serialize_from_host(
+              value,
+              tspec,
+              primary_host=primary_host,
+              context=ts_context,
+              transaction=ocdbt_transaction,
+              byte_limiter=info.byte_limiter,
+          )
+      )
+      array_metadatas.append(array_write_spec.metadata)
+    if array_metadata_store is not None:
+      write_coros.append(
+          array_metadata_store.write(
+              checkpoint_dir=infos[0].parent_dir,
+              array_metadatas=array_metadatas,
+              process_index=multihost.process_index(),
+          )
+      )
+
+    await asyncio.gather(*write_coros)
+    if ocdbt_transaction is not None:
+      await ocdbt_transaction.commit_async()
+
+    if s3_target is not None and local_write_dir is not None:
+      logging.info('Uploading staged checkpoint to %s', s3_target)
+      s3_utils.upload_directory_to_s3(local_write_dir, s3_target)
+  finally:
+    if local_write_dir is not None:
+      shutil.rmtree(local_write_dir, ignore_errors=True)
 
 
 def _wrap_random_key_data(
@@ -755,6 +783,22 @@ async def _deserialize_arrays(
   """Deserializes arrays and applies array_metadata if available."""
   total_start_time = time.time()
 
+  # When the source is an S3 path, download the entire checkpoint directory to
+  # a local temp directory first, then let TensorStore read from there.
+  s3_source: str | None = None
+  local_read_dir: str | None = None
+  if infos:
+    parent_dir_str = infos[0].parent_dir.as_posix()
+    if s3_utils.is_s3_path(parent_dir_str):
+      s3_source = parent_dir_str
+      local_read_dir = tempfile.mkdtemp(prefix='orbax_s3_read_')
+      logging.info(
+          'S3 source detected (%s); downloading to %s',
+          s3_source,
+          local_read_dir,
+      )
+      s3_utils.download_directory_from_s3(s3_source, local_read_dir)
+
   async def _async_deserialize(
       infos: Sequence[types.ParamInfo],
       args: Sequence[types.RestoreArgs],
@@ -774,6 +818,7 @@ async def _deserialize_arrays(
           metadata_key=metadata_key,
           raise_array_data_missing_error=info.raise_array_data_missing_error,
           target_dtype=arg.dtype,
+          directory_override=local_read_dir,
       )
       tspec = array_read_spec.json
 
@@ -810,27 +855,31 @@ async def _deserialize_arrays(
       total_io_bytes += io_bytes
     return deserialized_arrays, total_io_bytes
 
-  if array_metadata_store is not None:
-    (ret, total_io_bytes), array_metadatas = await asyncio.gather(
-        _async_deserialize(
-            infos,
-            args,
-            shardings,
-            metadata_key=metadata_key,
-        ),
-        array_metadata_store.read(
-            checkpoint_dir=infos[0].parent_dir,
-        ),
-    )
-    if array_metadatas:
-      ret = _wrap_random_key_data(array_metadatas, infos, ret)
-  else:
-    ret, total_io_bytes = await _async_deserialize(
-        infos,
-        args,
-        shardings,
-        metadata_key=metadata_key,
-    )
+  try:
+    if array_metadata_store is not None:
+      (ret, total_io_bytes), array_metadatas = await asyncio.gather(
+          _async_deserialize(
+              infos,
+              args,
+              shardings,
+              metadata_key=metadata_key,
+          ),
+          array_metadata_store.read(
+              checkpoint_dir=infos[0].parent_dir,
+          ),
+      )
+      if array_metadatas:
+        ret = _wrap_random_key_data(array_metadatas, infos, ret)
+    else:
+      ret, total_io_bytes = await _async_deserialize(
+          infos,
+          args,
+          shardings,
+          metadata_key=metadata_key,
+      )
+  finally:
+    if local_read_dir is not None:
+      shutil.rmtree(local_read_dir, ignore_errors=True)
 
   total_duration = time.time() - total_start_time
   io_throughput = total_io_bytes / total_duration if total_duration > 0 else 0

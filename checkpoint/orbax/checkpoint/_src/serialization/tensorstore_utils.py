@@ -746,12 +746,28 @@ def build_array_read_spec(
     metadata_key: str | None = None,
     raise_array_data_missing_error: bool = True,
     target_dtype: DType | None = None,
+    directory_override: str | None = None,
 ) -> ArrayReadSpec:
-  """Gets ArrayReadSpec for reading."""
+  """Gets ArrayReadSpec for reading.
+
+  Args:
+    info: ParamInfo for the array.
+    use_ocdbt: Whether the checkpoint uses the OCDBT format.
+    metadata_key: Optional metadata key.
+    raise_array_data_missing_error: Whether to raise on missing data.
+    target_dtype: Optional cast dtype.
+    directory_override: If set, use this local directory instead of
+      ``info.parent_dir``.  Used when the checkpoint has been staged locally
+      (e.g. after downloading from S3 via boto3).
+
+  Returns:
+    ArrayReadSpec for reading.
+  """
   if info.name is None or info.parent_dir is None:
     raise ValueError('Must provide info.name and info.parent_dir.')
+  directory = directory_override if directory_override is not None else info.parent_dir.as_posix()
   return ArrayReadSpec(
-      directory=info.parent_dir.as_posix(),
+      directory=directory,
       relative_array_filename=info.name,
       use_zarr3=info.use_zarr3,
       use_ocdbt=use_ocdbt,
@@ -773,13 +789,31 @@ def build_array_write_spec(
     replica_separate_folder: bool = False,
     metadata_key: str | None = None,
     ext_metadata: dict[str, Any] | None = None,
+    directory_override: str | None = None,
 ) -> ArrayWriteSpec:
-  """Gets ArrayWriteSpec for writing."""
+  """Gets ArrayWriteSpec for writing.
+
+  Args:
+    info: ParamInfo for the array.
+    arg: Optional SaveArgs.
+    global_shape: Global shape of the array.
+    local_shape: Local (write) shape of the array.
+    dtype: Array dtype.
+    use_ocdbt: Whether to use the OCDBT format.
+    process_index: OCDBT process index for the sub-directory.
+    replica_separate_folder: Whether to use a replica-separated folder.
+    metadata_key: Optional metadata key.
+    ext_metadata: Optional extended metadata.
+    directory_override: If set, use this local directory instead of
+      ``info.parent_dir``.  Used when the checkpoint is being staged locally
+      before uploading to S3 via boto3.
+
+  Returns:
+    ArrayWriteSpec for writing.
+  """
   if info.name is None or info.parent_dir is None:
     raise ValueError('Must provide info.name and info.parent_dir.')
-  parent_dir = info.parent_dir
-  assert parent_dir is not None
-  directory = parent_dir.as_posix()
+  directory = directory_override if directory_override is not None else info.parent_dir.as_posix()
 
   return ArrayWriteSpec(
       directory,
