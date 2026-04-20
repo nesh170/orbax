@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import functools
 import os
+import pathlib
 import shutil
 import tempfile
 import time
@@ -543,6 +545,15 @@ def _serialize_arrays(
     )
 
 
+def _info_with_local_dir(
+    info: types.ParamInfo, local_dir: str
+) -> types.ParamInfo:
+  """Shallow-copy of info with parent_dir redirected to a local directory."""
+  patched = copy.copy(info)
+  patched._parent_dir = pathlib.Path(local_dir)  # pylint: disable=protected-access
+  return patched
+
+
 async def _async_serialize_replica_slices(
     values: Sequence[replica_slices.ReplicaSlices],
     infos: Sequence[types.ParamInfo],
@@ -591,8 +602,13 @@ async def _async_serialize_replica_slices(
               1,
           )
       await info.await_path_creation()
+      write_info = (
+          _info_with_local_dir(info, local_write_dir)
+          if local_write_dir is not None
+          else info
+      )
       array_write_spec = ts_utils.build_array_write_spec(
-          info=info,
+          info=write_info,
           arg=arg,
           global_shape=value.global_shape,
           local_shape=value.local_shape,
@@ -604,7 +620,6 @@ async def _async_serialize_replica_slices(
           replica_separate_folder=replica_separate_folder,
           metadata_key=metadata_key,
           ext_metadata=ext_metadata.get(info.name),
-          directory_override=local_write_dir,
       )
       tspec = array_write_spec.json
       ts_context = info.ts_context
@@ -812,13 +827,17 @@ async def _deserialize_arrays(
       await _validate_non_ocdbt_files(infos, metadata_key)
     deserialize_ops = []
     for info, arg, sharding in zip(infos, args, shardings):
+      read_info = (
+          _info_with_local_dir(info, local_read_dir)
+          if local_read_dir is not None
+          else info
+      )
       array_read_spec = ts_utils.build_array_read_spec(
-          info,
+          read_info,
           use_ocdbt=use_ocdbt,
           metadata_key=metadata_key,
           raise_array_data_missing_error=info.raise_array_data_missing_error,
           target_dtype=arg.dtype,
-          directory_override=local_read_dir,
       )
       tspec = array_read_spec.json
 
